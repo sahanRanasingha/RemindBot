@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import datetime
+import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackContext, CallbackQueryHandler, MessageHandler, filters
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -21,6 +22,7 @@ expired_tasks = {}
 # Task state
 USER_TASK_STATE = {}
 EDIT_TASK_INDEX = {}
+USER_TIMEZONES = {}  # Store user timezones
 
 # Store scheduled jobs
 SCHEDULED_JOBS = {}
@@ -95,7 +97,7 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
                     SCHEDULED_JOBS[user_id][task_index].remove()
 
                 # Reschedule the reminder
-                job = scheduler.add_job(send_reminder_wrapper, DateTrigger(run_date=reminder_datetime), args=[update, user_id])
+                job = schedule_reminder(update, user_id, reminder_datetime, task_index)
                 SCHEDULED_JOBS.setdefault(user_id, {})[task_index] = job
 
                 # Clear the task state and edit index after completion
@@ -112,7 +114,7 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
                 reminder_datetime = datetime.datetime.combine(reminder_date, reminder_time)
 
                 # Schedule the reminder
-                job = scheduler.add_job(send_reminder_wrapper, DateTrigger(run_date=reminder_datetime), args=[update, user_id])
+                job = schedule_reminder(update, user_id, reminder_datetime, len(tasks[user_id]) - 1)
                 SCHEDULED_JOBS.setdefault(user_id, {})[len(tasks[user_id]) - 1] = job
 
                 # Clear the task state after completion
@@ -123,11 +125,21 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
         except ValueError:
             await update.message.reply_text("Invalid format. Please send the time in this format: HH:MM.")
 
+def schedule_reminder(update, user_id, reminder_datetime, task_index):
+    user_timezone = USER_TIMEZONES.get(user_id, 'UTC')
+    local_tz = pytz.timezone(user_timezone)
+    local_dt = local_tz.localize(reminder_datetime)
+    utc_dt = local_dt.astimezone(pytz.utc)
+
+    # Schedule the reminder in UTC time
+    job = scheduler.add_job(send_reminder_wrapper, DateTrigger(run_date=utc_dt), args=[update, user_id, task_index])
+    return job
+
 # Function to send a reminder to the user
-async def send_reminder(update: Update, user_id):
+async def send_reminder(update: Update, user_id, task_index):
     task = tasks.get(user_id, [])
     if task:
-        task = task.pop(0)  # Get and remove the earliest task
+        task = task.pop(task_index)  # Get and remove the specific task
         reminder_name = task['reminder_name']
         reminder_description = task['reminder_description']
         reminder_date = task['reminder_date']
@@ -145,10 +157,10 @@ async def send_reminder(update: Update, user_id):
         await update.message.reply_text("Reminder not found!")
 
 # Synchronous wrapper function to call the asynchronous send_reminder function
-def send_reminder_wrapper(update: Update, user_id):
+def send_reminder_wrapper(update: Update, user_id, task_index):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(send_reminder(update, user_id))
+    loop.run_until_complete(send_reminder(update, user_id, task_index))
     loop.close()
 
 # Function to view all reminders for a user
